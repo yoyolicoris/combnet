@@ -14,7 +14,7 @@ import GPUtil
 
 
 # Configuration name
-CONFIG: str = 'combnet'
+CONFIG: str = "combnet"
 
 
 ###############################################################################
@@ -24,28 +24,30 @@ CONFIG: str = 'combnet'
 
 # Names of all normal datasets
 # DATASETS: List[str] = ['giantsteps', 'giantsteps_mtg', 'maestro', 'timit']
-DATASETS: List[str] = ['giantsteps', 'giantsteps_mtg', 'timit']
+DATASETS: List[str] = ["giantsteps", "giantsteps_mtg", "timit"]
 
 # Names of all synthetic datasets
 # SYNTHETIC_DATASETS: List[str] = ['chords', 'notes']
-SYNTHETIC_DATASETS: List[str] = ['notes']
+SYNTHETIC_DATASETS: List[str] = ["notes"]
+
 
 @yapecs.ComputedProperty(compute_once=False)
 def ALL_DATASETS() -> List[str]:
     return combnet.DATASETS + combnet.SYNTHETIC_DATASETS
 
+
 # Datasets for evaluation
-EVALUATION_DATASETS: List[str] = ['giantsteps']
+EVALUATION_DATASETS: List[str] = ["giantsteps"]
 
 # FEATURES: List[str] = ['spectrogram', 'highpass_audio']
-FEATURES: List[str] = ['spectrogram']
+FEATURES: List[str] = ["spectrogram"]
 
-INPUT_FEATURES: List[str] = ['spectrogram']
+INPUT_FEATURES: List[str] = ["spectrogram"]
 
 # SAMPLE_RATE = 16000
 SAMPLE_RATE: Union[float, int] = 44_100
 
-HOPSIZE: int = (SAMPLE_RATE // 5)
+HOPSIZE: int = SAMPLE_RATE // 5
 
 N_FFT: int = 8192
 
@@ -55,19 +57,44 @@ WINDOW_SIZE: int = 8192
 #     return combnet.N_FFT
 
 KEY_MAP: Dict[str, str] = {
-    'A# minor': 'Bb minor',
-    'C# minor': 'Db minor',
-    'D# minor': 'Eb minor',
-    'F# minor': 'Gb minor',
-    'G# minor': 'Ab minor',
-    'A# major': 'Bb major',
-    'C# major': 'Db major',
-    'D# major': 'Eb major',
-    'F# major': 'Gb major',
-    'G# major': 'Ab major',
+    "A# minor": "Bb minor",
+    "C# minor": "Db minor",
+    "D# minor": "Eb minor",
+    "F# minor": "Gb minor",
+    "G# minor": "Ab minor",
+    "A# major": "Bb major",
+    "C# major": "Db major",
+    "D# major": "Eb major",
+    "F# major": "Gb major",
+    "G# major": "Ab major",
 }
 
-GIANTSTEPS_KEYS: List[str] = ['E minor','F minor', 'G minor', 'Db minor', 'C minor', 'Ab major', 'Eb minor', 'G major', 'Bb minor', 'A minor', 'C major', 'D minor', 'Ab minor', 'F major', 'Gb minor', 'B minor', 'Eb major', 'Bb major', 'A major', 'B major', 'D major', 'E major', 'Gb major', 'Db major']
+GIANTSTEPS_KEYS: List[str] = [
+    "E minor",
+    "F minor",
+    "G minor",
+    "Db minor",
+    "C minor",
+    "Ab major",
+    "Eb minor",
+    "G major",
+    "Bb minor",
+    "A minor",
+    "C major",
+    "D minor",
+    "Ab minor",
+    "F major",
+    "Gb minor",
+    "B minor",
+    "Eb major",
+    "Bb major",
+    "A major",
+    "B major",
+    "D major",
+    "E major",
+    "Gb major",
+    "Db major",
+]
 
 CLASS_MAP: Dict[str, int] = {k: i for i, k in enumerate(GIANTSTEPS_KEYS)}
 
@@ -80,24 +107,24 @@ MASK_INDEX = -100
 
 ROOT_DIR = Path(__file__).parent.parent.parent
 
-CONFIG_DIR = ROOT_DIR / 'config'
+CONFIG_DIR = ROOT_DIR / "config"
 
 # Location to save assets to be bundled with pip release
-ASSETS_DIR = Path(__file__).parent.parent / 'assets'
+ASSETS_DIR = Path(__file__).parent.parent / "assets"
 
 # Location of preprocessed features
-CACHE_DIR = Path(__file__).parent.parent.parent / 'data' / 'cache'
-CACHE_DIR = Path(os.getenv('COMBNET_CACHE_DIR', CACHE_DIR))
+CACHE_DIR = Path(__file__).parent.parent.parent / "data" / "cache"
+CACHE_DIR = Path(os.getenv("COMBNET_CACHE_DIR", CACHE_DIR))
 
 # Location of datasets on disk
-DATA_DIR = Path(__file__).parent.parent.parent / 'data' / 'datasets'
-DATA_DIR = Path(os.getenv('COMBNET_DATA_DIR', DATA_DIR))
+DATA_DIR = Path(__file__).parent.parent.parent / "data" / "datasets"
+DATA_DIR = Path(os.getenv("COMBNET_DATA_DIR", DATA_DIR))
 
 # Location to save evaluation artifacts
-EVAL_DIR = Path(__file__).parent.parent.parent / 'eval'
+EVAL_DIR = Path(__file__).parent.parent.parent / "eval"
 
 # Location to save training and adaptation artifacts
-RUNS_DIR = Path(__file__).parent.parent.parent / 'runs'
+RUNS_DIR = Path(__file__).parent.parent.parent / "runs"
 
 
 ###############################################################################
@@ -114,7 +141,7 @@ LOG_INTERVAL = 100
 # Number of steps to perform for tensorboard logging
 DEFAULT_EVALUATION_STEPS = 8
 
-METRICS = ['accuracy', 'loss', 'categorical', 'mirex_weighted']
+METRICS = ["accuracy", "loss", "categorical", "mirex_weighted"]
 
 
 ###############################################################################
@@ -122,9 +149,9 @@ METRICS = ['accuracy', 'loss', 'categorical', 'mirex_weighted']
 ###############################################################################
 
 # model submodule chosen from ['classifiers']
-MODEL_MODULE = 'key_classifiers'
+MODEL_MODULE = "key_classifiers"
 
-MODEL_CLASS = 'CombClassifier'
+MODEL_CLASS = "CombClassifier"
 
 MODEL_KWARGS = {}
 
@@ -150,7 +177,8 @@ STEPS = 100_000
 
 # Number of data loading worker threads
 try:
-    NUM_WORKERS = int(os.cpu_count() / max(1, len(GPUtil.getGPUs())))
+    # NUM_WORKERS = int(os.cpu_count() / max(1, len(GPUtil.getGPUs())))
+    NUM_WORKERS = 4
 except ValueError:
     NUM_WORKERS = os.cpu_count()
 
@@ -166,7 +194,7 @@ SCHEDULER_KWARGS = {}
 PARAM_GROUPS = None
 
 # choice from 'equal' and 'random'
-F0_INIT_METHOD = 'random'
+F0_INIT_METHOD = "random"
 
 
 LOSS_FUNCTION = None
