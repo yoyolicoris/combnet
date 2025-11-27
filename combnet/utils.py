@@ -12,11 +12,9 @@ def pos_alpha_even_angle2poles(angles: Tensor):
     """
 
     min_angle = angles.min()
-    max_bins = torch.pi // min_angle + 1
+    max_bins = (torch.pi // min_angle).long().item() + 1
 
-    series = (
-        torch.arange(1, max_bins.item(), device=angles.device).unsqueeze(1) * angles
-    )
+    series = torch.arange(1, max_bins, device=angles.device).unsqueeze(1) * angles
     mask = series < torch.pi
 
     angles_len = mask.count_nonzero(dim=0) + 1
@@ -26,8 +24,8 @@ def pos_alpha_even_angle2poles(angles: Tensor):
         fadein, (torch.pi - series) / target_interval, 1
     )
     return (
-        torch.vstack([torch.ones_like(angles), -torch.ones_like(angles)]).T,
-        torch.where(mask, poles, 0.0).T,
+        torch.stack([torch.ones_like(angles), -torch.ones_like(angles)], 0),
+        torch.where(mask, poles, 0.0),
     )
 
 
@@ -54,7 +52,7 @@ def neg_alpha_even_angle2poles(angles: Tensor):
     poles = torch.exp(1j * series) * torch.where(
         fadein, (torch.pi - series) / target_interval, 1
     )
-    return None, torch.where(mask, poles, 0.0).T
+    return None, torch.where(mask, poles, 0.0)
 
 
 def pos_alpha_odd_angle2poles(angles: Tensor):
@@ -80,7 +78,7 @@ def pos_alpha_odd_angle2poles(angles: Tensor):
     poles = torch.exp(1j * series) * torch.where(
         fadein, (torch.pi - series) / target_interval, 1
     )  # ** 0.5
-    return torch.ones_like(angles).unsqueeze(1), torch.where(mask, poles, 0.0).T
+    return torch.ones_like(angles).unsqueeze(0), torch.where(mask, poles, 0.0)
 
 
 def neg_alpha_odd_angle2pole(angles: Tensor):
@@ -107,7 +105,7 @@ def neg_alpha_odd_angle2pole(angles: Tensor):
         fadein, (torch.pi - series) / target_interval, 1
     )
     # return: real poles, complex conjugate poles
-    return -torch.ones_like(angles).unsqueeze(1), torch.where(mask, poles, 0.0).T
+    return -torch.ones_like(angles).unsqueeze(0), torch.where(mask, poles, 0.0)
 
 
 def poles2res(poles: Tensor):
@@ -127,6 +125,6 @@ def poles2res(poles: Tensor):
     windowed_mask = aug_mask.unfold(1, M - 1, 1)
 
     diff = poles.unsqueeze(-1) - windowed_poles
-    diff = torch.where(windowed_mask, diff, 1.0)
-    res = poles**actual_M / diff.prod(dim=2)
+    denom = torch.where(windowed_mask & mask.unsqueeze(-1), diff, 1.0).prod(dim=2)
+    res = poles ** (actual_M.unsqueeze(1) - 1) / denom
     return torch.where(mask, res, 0.0)
