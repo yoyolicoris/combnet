@@ -127,7 +127,7 @@ def train(dataset, directory=combnet.RUNS_DIR / combnet.CONFIG, gpu=None):
 
         for batch in train_loader:
 
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
             x, y = batch
             x = x.to(device)
             y = y.to(device)
@@ -162,7 +162,8 @@ def train(dataset, directory=combnet.RUNS_DIR / combnet.CONFIG, gpu=None):
                 if hasattr(model, "parameter_groups"):
                     groups = model.parameter_groups()
                     if "f0" in groups:
-                        f = groups["f0"][0]  # TODO expand to more than just first?
+                        # f = groups["f0"][0]  # TODO expand to more than just first?
+                        f = model.layers[0].f
                         scaling_function = None
                         grouped_scalars = {}
                         for m in model.modules():
@@ -190,7 +191,12 @@ def train(dataset, directory=combnet.RUNS_DIR / combnet.CONFIG, gpu=None):
                         else combnet.DEFAULT_EVALUATION_STEPS
                     )
                     evaluate_fn = functools.partial(
-                        evaluate, directory, step, deepcopy(model).cpu(), gpu=None
+                        evaluate,
+                        directory,
+                        step,
+                        model,
+                        gpu=gpu,
+                        # deepcopy(model).cpu(), gpu=None
                     )
                     evaluate_fn(
                         "train", train_loader, evaluation_steps=evaluation_steps
@@ -287,33 +293,33 @@ def evaluate(
 
     model.eval()
 
-    with torch.inference_mode():
-        # Setup evaluation metrics
-        metrics = combnet.evaluate.Metrics()
+    # with torch.inference_mode():
+    # Setup evaluation metrics
+    metrics = combnet.evaluate.Metrics()
 
-        for i, batch in tqdm(enumerate(loader)):
+    for i, batch in tqdm(enumerate(loader)):
 
-            x, y = batch
-            x = x.to(device)
-            y = y.to(device)
+        x, y = batch
+        x = x.to(device)
+        y = y.to(device)
 
-            # Forward pass
-            z = model(x)
+        # Forward pass
+        z = model(x)
 
-            # Update metrics
-            metrics.update(z, y)
+        # Update metrics
+        metrics.update(z, y)
 
-            # Stop when we exceed some number of batches
-            if evaluation_steps is not None and i + 1 == evaluation_steps:
-                break
+        # Stop when we exceed some number of batches
+        if evaluation_steps is not None and i + 1 == evaluation_steps:
+            break
 
-        # Format results
-        scalars = {f"{key}/{condition}": value for key, value in metrics().items()}
-        # print(scalars)
+    # Format results
+    scalars = {f"{key}/{condition}": value for key, value in metrics().items()}
+    # print(scalars)
 
-        # Write to tensorboard
-        torchutil.tensorboard.update(directory, step, scalars=scalars)
-    # model.train()
+    # Write to tensorboard
+    torchutil.tensorboard.update(directory, step, scalars=scalars)
+    model.train()
 
 
 def log_f0(directory, step, model):
