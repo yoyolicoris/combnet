@@ -126,5 +126,5 @@ def poles2res(poles: Tensor):
 
     diff = poles.unsqueeze(-1) - windowed_poles
     denom = torch.where(windowed_mask & mask.unsqueeze(-1), diff, 1.0).prod(dim=2)
-    res = poles ** (actual_M.unsqueeze(1) - 1) / denom
+    res = poles ** actual_M.unsqueeze(1) / denom
     return torch.where(mask, res, 0.0)
