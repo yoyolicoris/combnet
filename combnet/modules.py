@@ -9,12 +9,16 @@ from torch.nn.utils.parametrize import register_parametrization
 from typing import Union, Optional
 from philtorch.lti import lfilter, state_space
 from philtorch.mat import companion
+from torch_fftconv import fft_conv1d
+import math
 
 from combnet.utils import (
     neg_alpha_even_angle2poles,
     pos_alpha_even_angle2poles,
     poles2res,
 )
+
+torch.backends.cuda.cufft_plan_cache[0].max_size = 32
 
 
 # Wrap between K and N
@@ -57,7 +61,7 @@ class MinMax(SmoothingCoef):
         return super().right_inverse((y - self.min) / (self.max - self.min))
 
 
-class ScalingFunction(nn.Module):
+class ScalingFunction(SmoothingCoef):
     def __init__(self, min_freq, max_freq):
         super().__init__()
         self.min_freq = min_freq
@@ -66,7 +70,7 @@ class ScalingFunction(nn.Module):
 
     @torch.compile
     def forward(self, f: torch.Tensor):
-        s = F.sigmoid(f)
+        s = super().forward(f)
         o = self.min_freq * self.fratio**s
         return o
 
@@ -87,6 +91,12 @@ class ScalingFunctionBins(ScalingFunction):
 
 
 class NegativeAlphaScalingFunctionBins(ScalingFunctionBins):
+    @torch.compile
+    def forward(self, f: torch.Tensor):
+        return super().forward(f) * 2
+
+
+class NegativeAlphaScalingFunction(ScalingFunction):
     @torch.compile
     def forward(self, f: torch.Tensor):
         return super().forward(f) * 2
@@ -156,7 +166,17 @@ class C2(nn.Module):
                     )
 
             else:
-                register_parametrization(self, "f", ScalingFunction(min_freq, max_freq))
+                if isinstance(alpha, float) and alpha < 0:
+
+                    register_parametrization(
+                        self,
+                        "f",
+                        NegativeAlphaScalingFunction(min_freq, max_freq),
+                    )
+                else:
+                    register_parametrization(
+                        self, "f", ScalingFunction(min_freq, max_freq)
+                    )
 
         self.a = torch.nn.Parameter(torch.full((out_channels,), alpha))
         register_parametrization(self, "a", AlphaScalingFunction())
@@ -164,6 +184,10 @@ class C2(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         f = self.f
         num_filters = f.shape[0]
+        # print(x.shape, num_filters)
+
+        impulse = x.new_zeros(x.shape[-1])
+        impulse[0] = 1.0
 
         if hasattr(self, "linear"):
             h = self.linear(x.mT).mT  # B x C x T
@@ -173,14 +197,14 @@ class C2(nn.Module):
         angles = 2 * torch.pi * f / self.sr
         alphas = self.a
         mask = alphas < 0
+
         radius = alphas.abs() ** (angles * 0.5 / torch.pi)
-        out = torch.empty_like(h)
+        full_ir = h.new_empty(num_filters, impulse.shape[0])
 
         if torch.any(~mask):
             num_pos_alpha = (~mask).count_nonzero().item()
             masked_angles = angles[~mask]
             masked_radius = radius[~mask]
-            masked_input = h[:, ~mask, :]
 
             rp, cp = pos_alpha_even_angle2poles(masked_angles)
             rp, cp = rp * masked_radius, cp * masked_radius
@@ -193,7 +217,7 @@ class C2(nn.Module):
             real_b1 = real_res.sum(1)
             real_b2 = -(real_res[:, 0] * rp[:, 1] + real_res[:, 1] * rp[:, 0])
             real_a1 = -rp.sum(1)
-            real_a2 = rp[:, 0] * rp[:, 1]
+            real_a2 = rp.prod(1)
 
             # conj biquad
             conj_poles_mask = cp.abs() > 0
@@ -211,7 +235,8 @@ class C2(nn.Module):
 
             conj_b1 = masked_cp_res.real * 2
             conj_b2 = -2 * (
-                masked_cp_res.real * masked_cp.real - masked_cp.imag * masked_cp.imag
+                masked_cp_res.real * masked_cp.real
+                + masked_cp_res.imag * masked_cp.imag
             )
             conj_a1 = -2 * masked_cp.real
             conj_a2 = masked_cp.abs().square()
@@ -227,46 +252,57 @@ class C2(nn.Module):
                     ),
                 ],
                 dim=1,
-            ).repeat(masked_input.shape[0], 1)
+            )  # .repeat(masked_input.shape[0], 1)
             biquad_a = torch.stack(
                 [torch.cat([real_a1, conj_a1]), torch.cat([real_a2, conj_a2])], dim=1
-            ).repeat(masked_input.shape[0], 1)
+            )  # .repeat(masked_input.shape[0], 1)
 
             B = biquad_b
             A = companion(biquad_a).mT
+            # print(A.shape, B.shape)
 
             # repeated_input = masked_input.repeat_interleave(num_sections, dim=1)
             # print(filter_indices.shape, num_sections, masked_input.shape)
-            aug_input = torch.cat(
-                [
-                    masked_input,
-                    # masked_input.take_along_dim(filter_indices[None, :, None], dim=1),
-                    masked_input[:, filter_indices, :],
-                ],
-                dim=1,
-            )
-            y = state_space(A, aug_input.flatten(0, 1), B=B, out_idx=0).unflatten(
-                0, (aug_input.shape[0], -1)
-            )
+            # aug_input = torch.cat(
+            #     [
+            #         masked_input,
+            #         # masked_input.take_along_dim(filter_indices[None, :, None], dim=1),
+            #         masked_input[:, filter_indices, :],
+            #     ],
+            #     dim=1,
+            # )
+            ir = state_space(A, impulse.repeat(A.shape[0], 1), B=B, out_idx=0)
+            # .unflatten(
+            #     0, (aug_input.shape[0], -1)
+            # )
 
             # y = lfilter(biquad_b, biquad_a, aug_input.flatten(0, 1)).unflatten(
             #     0, (aug_input.shape[0], -1)
             # )
-            real_out, conj_out = y[:, :num_pos_alpha], y[:, num_pos_alpha:]
-            pos_out = (
-                real_out.index_reduce(
-                    1, filter_indices, conj_out, reduce="mean", include_self=True
+            real_ir, conj_ir = ir[:num_pos_alpha], ir[num_pos_alpha:]
+            pos_ir = (
+                real_ir.index_reduce(
+                    0, filter_indices, conj_ir, reduce="mean", include_self=True
                 )
-                + masked_input
+                + impulse
             )
-            out.masked_scatter_(~mask[None, :, None], pos_out)
+
+            # pos_out = F.conv1d(
+            #     masked_input,
+            #     pos_ir.unsqueeze(1).flip(-1),
+            #     padding=impulse.shape[0] - 1,
+            #     groups=masked_input.shape[1],
+            # )
+            # print(pos_out.shape, x.shape)
+
+            full_ir.masked_scatter_(~mask[:, None], pos_ir)
             # out[:, ~mask] = pos_out
             # out = pos_out
 
         if torch.any(mask):
+            num_neg_alpha = mask.count_nonzero().item()
             masked_angles = angles[mask]
             masked_radius = radius[mask]
-            masked_input = h[:, mask, :]
 
             _, cp = neg_alpha_even_angle2poles(masked_angles)
             cp = cp * masked_radius
@@ -283,34 +319,249 @@ class C2(nn.Module):
             masked_cp = cp[conj_poles_mask]
             masked_cp_res = cp_res[conj_poles_mask]
 
-            conj_b0 = masked_cp_res.real * 2
-            conj_b1 = -2 * (masked_cp_res * masked_cp.conj()).real
+            conj_b1 = masked_cp_res.real * 2
+            conj_b2 = -2 * (
+                masked_cp_res.real * masked_cp.real
+                + masked_cp_res.imag * masked_cp.imag
+            )
             conj_a1 = -2 * masked_cp.real
             conj_a2 = masked_cp.abs().square()
 
             num_sections = conj_poles_mask.count_nonzero(dim=1)
             biquad_b = (
-                torch.stack([conj_b0, conj_b1], dim=1)
-                .mul(num_sections[filter_indices].unsqueeze(1))
-                .repeat(masked_input.shape[0], 1)
+                torch.stack([conj_b1, conj_b2], dim=1).mul(
+                    num_sections[filter_indices].unsqueeze(1)
+                )
+                # .repeat(masked_input.shape[0], 1)
             )
-            biquad_a = torch.stack([conj_a1, conj_a2], dim=1).repeat(
-                masked_input.shape[0], 1
+            biquad_a = torch.stack([conj_a1, conj_a2], dim=1)
+            # .repeat(
+            # masked_input.shape[0], 1
+            # )
+            B = biquad_b
+            A = companion(biquad_a).mT
+
+            # aug_input = masked_input[:, filter_indices, :]
+            y = state_space(A, impulse.repeat(A.shape[0], 1), B=B, out_idx=0)
+            # y = lfilter(biquad_b, biquad_a, aug_input.flatten(0, 1)).unflatten(
+            #     0, (aug_input.shape[0], -1)
+            # )
+
+            neg_ir = (
+                y[:num_neg_alpha].index_reduce(
+                    0, filter_indices, y, reduce="mean", include_self=False
+                )
+                + impulse
             )
 
-            aug_input = masked_input.take_along_dim(
-                filter_indices[None, :, None], dim=1
+            full_ir.masked_scatter_(mask[:, None], neg_ir)
+
+        out = torch.fft.irfft(
+            torch.fft.rfft(h, n=impulse.shape[0] * 2 - 1)
+            * torch.fft.rfft(full_ir, n=impulse.shape[0] * 2 - 1),
+            n=impulse.shape[0] * 2 - 1,
+        )[..., : impulse.shape[0]]
+
+        return out
+
+
+class C2V2(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        min_freq,
+        max_freq,
+        alpha=0.9,
+        sr=16000,
+        decompose_level=1,
+    ):
+        super().__init__()
+        assert out_channels % (decompose_level * 2 - 1) == 0
+        assert alpha > 0, "this is the absolute value version"
+
+        num_filters = out_channels // (2 * decompose_level - 1)
+        self.sr = sr
+        if in_channels != 1:
+            self.linear = torch.nn.Linear(in_channels, num_filters, bias=False)
+
+        # self.log_f = torch.nn.Parameter(
+        #     torch.rand(
+        #         num_filters,
+        #     )
+        #     * (math.log(max_freq) - math.log(min_freq))
+        #     + math.log(min_freq)
+        # )
+        self.f = torch.nn.Parameter(
+            torch.rand(num_filters) * (max_freq - min_freq) + min_freq
+        )
+
+        register_parametrization(self, "f", MinMax(min=min_freq, max=max_freq))
+
+        self.alpha = torch.nn.Parameter(torch.full((num_filters,), alpha))
+        register_parametrization(self, "alpha", SmoothingCoef())
+
+        self.decompose_level = decompose_level
+        if decompose_level > 1:
+            self.register_buffer(
+                "combine_weights",
+                torch.tensor(
+                    [
+                        0.5**i
+                        for i in [decompose_level - 1]
+                        + list(range(decompose_level - 1, 0, -1))
+                    ]
+                ),
             )
 
-            y = lfilter(biquad_b, biquad_a, aug_input.flatten(0, 1)).unflatten(
-                0, (aug_input.shape[0], -1)
+    # @property
+    # def f(self):
+    #     return torch.exp(self.log_f)
+
+    def forward(self, x: Tensor) -> Tensor:
+        f = self.f
+        num_filters = f.shape[0]
+
+        impulse = x.new_zeros(x.shape[-1])
+        impulse[0] = 1.0
+
+        if hasattr(self, "linear"):
+            h = self.linear(x.mT).mT  # B x C x T
+        else:
+            h = x.expand(-1, num_filters, -1)  # B x C x T
+
+        base_angles = 2 * torch.pi * f / self.sr
+        alphas = self.alpha
+        neg_alpha_angles = []
+        for i in range(1, self.decompose_level):
+            base_angles = base_angles * 2
+            neg_alpha_angles.append(base_angles)
+
+        pos_alpha_angles = base_angles
+        radius = alphas ** (pos_alpha_angles * 0.5 / torch.pi)
+
+        rp, cp = pos_alpha_even_angle2poles(pos_alpha_angles)
+        rp, cp = rp * radius, cp * radius
+        rp, cp = rp.T, cp.T
+
+        res = poles2res(torch.cat([rp + 0j, cp, cp.conj()], dim=1))
+        real_res, cp_res = res[:, :2].real, res[:, 2 : cp.shape[1] + 2]
+
+        # real biquad
+        real_b1 = real_res.sum(1)
+        real_b2 = -(real_res[:, 0] * rp[:, 1] + real_res[:, 1] * rp[:, 0])
+        real_a1 = -rp.sum(1)
+        real_a2 = rp.prod(1)
+
+        # conj biquad
+        conj_poles_mask = cp.abs() > 0
+        filter_indices, poles_indices = torch.nonzero(conj_poles_mask, as_tuple=True)
+        masked_cp = cp[filter_indices, poles_indices]
+        masked_cp_res = cp_res[filter_indices, poles_indices]
+
+        conj_b1 = masked_cp_res.real * 2
+        conj_b2 = -2 * (
+            masked_cp_res.real * masked_cp.real + masked_cp_res.imag * masked_cp.imag
+        )
+        conj_a1 = -2 * masked_cp.real
+        conj_a2 = masked_cp.abs().square()
+
+        num_sections = conj_poles_mask.count_nonzero(dim=1) + 1
+        biquad_b = torch.stack(
+            [
+                torch.cat(
+                    [real_b1 * num_sections, conj_b1 * num_sections[filter_indices]]
+                ),
+                torch.cat(
+                    [real_b2 * num_sections, conj_b2 * num_sections[filter_indices]]
+                ),
+            ],
+            dim=1,
+        )
+        biquad_a = torch.stack(
+            [torch.cat([real_a1, conj_a1]), torch.cat([real_a2, conj_a2])], dim=1
+        )
+
+        B = biquad_b
+        A = companion(biquad_a).mT
+        ir = state_space(A, impulse.repeat(A.shape[0], 1), B=B, out_idx=0)
+        real_ir, conj_ir = ir[: alphas.shape[0]], ir[alphas.shape[0] :]
+        pos_ir = (
+            real_ir.index_reduce(
+                0, filter_indices, conj_ir, reduce="mean", include_self=True
+            )
+            + impulse
+        )
+
+        if len(neg_alpha_angles):
+            neg_alpha_angles = torch.cat(neg_alpha_angles, dim=0)
+            radius = alphas.repeat(self.decompose_level - 1) ** (
+                neg_alpha_angles * 0.5 / torch.pi
+            )
+            _, cp = neg_alpha_even_angle2poles(neg_alpha_angles)
+            cp = cp * radius
+            cp = cp.T
+
+            res = poles2res(torch.cat([cp, cp.conj()], dim=1))
+            cp_res, _ = res.chunk(2, dim=1)
+
+            # conj biquad
+            conj_poles_mask = cp.abs() > 0
+            filter_indices, poles_indices = torch.nonzero(
+                conj_poles_mask, as_tuple=True
+            )
+            masked_cp = cp[conj_poles_mask]
+            masked_cp_res = cp_res[conj_poles_mask]
+
+            conj_b1 = masked_cp_res.real * 2
+            conj_b2 = -2 * (
+                masked_cp_res.real * masked_cp.real
+                + masked_cp_res.imag * masked_cp.imag
+            )
+            conj_a1 = -2 * masked_cp.real
+            conj_a2 = masked_cp.abs().square()
+
+            num_sections = conj_poles_mask.count_nonzero(dim=1)
+            biquad_b = torch.stack([conj_b1, conj_b2], dim=1).mul(
+                num_sections[filter_indices].unsqueeze(1)
+            )
+            biquad_a = torch.stack([conj_a1, conj_a2], dim=1)
+            B = biquad_b
+            A = companion(biquad_a).mT
+
+            y = state_space(A, impulse.repeat(A.shape[0], 1), B=B, out_idx=0)
+
+            neg_ir = (
+                y[: neg_alpha_angles.shape[0]].index_reduce(
+                    0, filter_indices, y, reduce="mean", include_self=False
+                )
+                + impulse
             )
 
-            neg_out = h.index_reduce(
-                1, filter_indices, y, reduce="mean", include_self=False
+            full_ir = torch.cat([neg_ir, pos_ir], dim=0).unflatten(
+                0, (self.decompose_level, -1)
             )
+        else:
+            full_ir = pos_ir
 
-            out[:, mask] = neg_out
+        convolved = torch.fft.irfft(
+            torch.fft.rfft(h, n=impulse.shape[0] * 2 - 1).unsqueeze(1)
+            * torch.fft.rfft(full_ir, n=impulse.shape[0] * 2 - 1),
+            n=impulse.shape[0] * 2 - 1,
+        )[..., : impulse.shape[0]]
+
+        if self.decompose_level > 1:
+            weighted = convolved.flip(1) * self.combine_weights[:, None, None]
+            out = torch.cat(
+                [
+                    convolved,
+                    weighted.cumsum(1)[:, 1:]
+                    / self.combine_weights.cumsum(0)[1:, None, None],
+                ],
+                dim=1,
+            ).flatten(1, 2)
+        else:
+            out = convolved.squeeze(1)
 
         return out
 
