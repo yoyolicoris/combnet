@@ -3,8 +3,10 @@ import tqdm
 
 import combnet
 
+
 def generate_midi_file(midi_file, n_notes):
     import pretty_midi
+
     pm = pretty_midi.PrettyMIDI()
     instrument = pretty_midi.Instrument(program=0)
 
@@ -14,10 +16,8 @@ def generate_midi_file(midi_file, n_notes):
         duration = uniform(0.2, 1.0)
         velocity = randint(50, 100)
         note = pretty_midi.Note(
-            velocity=velocity,
-            pitch=pitch,
-            start=start_time,
-            end=start_time + duration)
+            velocity=velocity, pitch=pitch, start=start_time, end=start_time + duration
+        )
         instrument.notes.append(note)
         start_time += duration
 
@@ -29,16 +29,19 @@ def notes(n=1000):
     """
     Generate the notes synthetic dataset using pyfluidsynth and pretty_midi
     """
-    dataset_dir = combnet.DATA_DIR / 'notes'
+    dataset_dir = combnet.DATA_DIR / "notes"
     dataset_dir.mkdir(parents=True, exist_ok=True)
-    for i in tqdm.tqdm(range(0, n), desc='synthesizing notes dataset', total=n, dynamic_ncols=True):
-        stem = f'{i:04d}'
-        midi_file = dataset_dir / f'{stem}.midi'
-        n_notes = randint(3, 10)
+    for i in tqdm.tqdm(
+        range(0, n), desc="synthesizing notes dataset", total=n, dynamic_ncols=True
+    ):
+        stem = f"{i:04d}"
+        midi_file = dataset_dir / f"{stem}.midi"
+        # n_notes = randint(3, 5)
+        n_notes = 4
         generate_midi_file(midi_file, n_notes)
 
-        label_file = dataset_dir / f'{stem}-labels.pt'
+        label_file = dataset_dir / f"{stem}-labels.pt"
         combnet.data.synthesize.from_midi_to_labels(midi_file, label_file)
 
-        wav_file = dataset_dir / f'{stem}.wav'
+        wav_file = dataset_dir / f"{stem}.wav"
         combnet.data.synthesize.from_midi_to_wav(midi_file, wav_file)
