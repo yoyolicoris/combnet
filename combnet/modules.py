@@ -107,6 +107,20 @@ class AlphaScalingFunction(nn.Tanh):
         return 0.5 * torch.log((1 + a) / (1 - a))
 
 
+class StrictlyOrdered(nn.Module):
+    def __init__(self, min_val: float, max_val: float):
+        super().__init__()
+        self.min_val = min_val
+        self.max_val = max_val
+
+    def forward(self, logits: torch.Tensor) -> torch.Tensor:
+        logits = torch.cat([logits, logits.new_zeros(1)], dim=0)
+        s = F.softmax(logits, dim=0)
+        return self.min_val + torch.cumsum(s, dim=0)[:-1] * (
+            self.max_val - self.min_val
+        )
+
+
 class C2(nn.Module):
     def __init__(
         self,
@@ -370,18 +384,19 @@ class C2V2(nn.Module):
         self,
         in_channels,
         out_channels,
-        min_freq,
-        max_freq,
+        start_freq,
         alpha=0.9,
         sr=16000,
         decompose_level=1,
+        bidirectional=False,
     ):
         super().__init__()
-        assert out_channels % (decompose_level * 2 - 1) == 0
+        # assert out_channels % (decompose_level * 2 - 1) == 0
         assert alpha > 0, "this is the absolute value version"
 
-        num_filters = out_channels // (2 * decompose_level - 1)
+        num_filters = out_channels  # // (2 * decompose_level - 1)
         self.sr = sr
+        self.bidirectional = bidirectional
         if in_channels != 1:
             self.linear = torch.nn.Linear(in_channels, num_filters, bias=False)
 
@@ -392,11 +407,12 @@ class C2V2(nn.Module):
         #     * (math.log(max_freq) - math.log(min_freq))
         #     + math.log(min_freq)
         # )
-        self.f = torch.nn.Parameter(
-            torch.rand(num_filters) * (max_freq - min_freq) + min_freq
-        )
-
-        register_parametrization(self, "f", MinMax(min=min_freq, max=max_freq))
+        # self.f = torch.nn.Parameter(
+        #     torch.rand(num_filters) * (max_freq - min_freq) + min_freq
+        # )
+        # register_parametrization(self, "f", MinMax(min=min_freq, max=max_freq))
+        self.f = torch.nn.Parameter(torch.randn(num_filters))
+        register_parametrization(self, "f", StrictlyOrdered(start_freq, start_freq * 2))
 
         self.alpha = torch.nn.Parameter(torch.full((num_filters,), alpha))
         register_parametrization(self, "alpha", SmoothingCoef())
@@ -432,17 +448,18 @@ class C2V2(nn.Module):
 
         base_angles = 2 * torch.pi * f / self.sr
         alphas = self.alpha
-        neg_alpha_angles = []
-        for i in range(1, self.decompose_level):
-            base_angles = base_angles * 2
-            neg_alpha_angles.append(base_angles)
+        radius = alphas ** (base_angles * 0.5 / torch.pi)
 
-        pos_alpha_angles = base_angles
-        radius = alphas ** (pos_alpha_angles * 0.5 / torch.pi)
-
-        rp, cp = pos_alpha_even_angle2poles(pos_alpha_angles)
+        rp, cp = pos_alpha_even_angle2poles(base_angles)
         rp, cp = rp * radius, cp * radius
         rp, cp = rp.T, cp.T
+
+        neg_alpha_cp = []
+        for i in range(1, self.decompose_level):
+            neg_alpha_cp.append(cp[:, ::2])
+            cp = cp[:, 1::2]
+            # base_angles = base_angles * 2
+            # neg_alpha_angles.append(base_angles)
 
         res = poles2res(torch.cat([rp + 0j, cp, cp.conj()], dim=1))
         real_res, cp_res = res[:, :2].real, res[:, 2 : cp.shape[1] + 2]
@@ -493,14 +510,25 @@ class C2V2(nn.Module):
             + impulse
         )
 
-        if len(neg_alpha_angles):
-            neg_alpha_angles = torch.cat(neg_alpha_angles, dim=0)
-            radius = alphas.repeat(self.decompose_level - 1) ** (
-                neg_alpha_angles * 0.5 / torch.pi
-            )
-            _, cp = neg_alpha_even_angle2poles(neg_alpha_angles)
-            cp = cp * radius
-            cp = cp.T
+        if len(neg_alpha_cp):
+            max_M = max(cp.shape[1] for cp in neg_alpha_cp)
+            neg_alpha_cp = [
+                (
+                    torch.cat(
+                        [cp, cp.new_zeros(cp.shape[0], max_M - cp.shape[1])], dim=1
+                    )
+                    if cp.shape[1] < max_M
+                    else cp
+                )
+                for cp in neg_alpha_cp
+            ]
+            cp = torch.cat(neg_alpha_cp, dim=0)
+            # radius = alphas.repeat(self.decompose_level - 1) ** (
+            #     neg_alpha_angles * 0.5 / torch.pi
+            # )
+            # _, cp = neg_alpha_even_angle2poles(neg_alpha_angles)
+            # cp = cp * radius
+            # cp = cp.T
 
             res = poles2res(torch.cat([cp, cp.conj()], dim=1))
             cp_res, _ = res.chunk(2, dim=1)
@@ -522,9 +550,10 @@ class C2V2(nn.Module):
             conj_a2 = masked_cp.abs().square()
 
             num_sections = conj_poles_mask.count_nonzero(dim=1)
-            biquad_b = torch.stack([conj_b1, conj_b2], dim=1).mul(
-                num_sections[filter_indices].unsqueeze(1)
-            )
+            biquad_b = torch.stack([conj_b1, conj_b2], dim=1) * num_sections[
+                filter_indices
+            ].unsqueeze(1)
+
             biquad_a = torch.stack([conj_a1, conj_a2], dim=1)
             B = biquad_b
             A = companion(biquad_a).mT
@@ -532,7 +561,7 @@ class C2V2(nn.Module):
             y = state_space(A, impulse.repeat(A.shape[0], 1), B=B, out_idx=0)
 
             neg_ir = (
-                y[: neg_alpha_angles.shape[0]].index_reduce(
+                y[: cp.shape[0]].index_reduce(
                     0, filter_indices, y, reduce="mean", include_self=False
                 )
                 + impulse
@@ -544,11 +573,19 @@ class C2V2(nn.Module):
         else:
             full_ir = pos_ir
 
+        X = torch.fft.rfft(h, n=impulse.shape[0] * 2 - 1)
+        H = torch.fft.rfft(full_ir, n=impulse.shape[0] * 2 - 1)
         convolved = torch.fft.irfft(
-            torch.fft.rfft(h, n=impulse.shape[0] * 2 - 1).unsqueeze(1)
-            * torch.fft.rfft(full_ir, n=impulse.shape[0] * 2 - 1),
+            X.unsqueeze(1) * H,
             n=impulse.shape[0] * 2 - 1,
         )[..., : impulse.shape[0]]
+
+        if self.bidirectional:
+            convolved_rev = torch.fft.irfft(
+                X.unsqueeze(1) * H.conj(),
+                n=impulse.shape[0] * 2 - 1,
+            )[..., : impulse.shape[0]]
+            convolved = torch.cat([convolved_rev, convolved], dim=2)
 
         if self.decompose_level > 1:
             weighted = convolved.flip(1) * self.combine_weights[:, None, None]
